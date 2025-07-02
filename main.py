@@ -2,6 +2,7 @@
 """A simple cmd2 application."""
 import glob
 import typing
+from copy import copy
 from typing import Any
 import functools
 import os
@@ -140,7 +141,9 @@ class CnaasCliApp(cmd2.Cmd):
                 return convert_list_of_dicts(yaml_item[token], "name")
             # TODO: neighbor_v4
             else:
-                if isinstance(yaml_item, dict) and token in yaml_item:
+                if isinstance(yaml_item, list) and token < len(yaml_item):
+                    return yaml_item[token]
+                elif isinstance(yaml_item, dict) and token in yaml_item:
                     return yaml_item[token]
         except Exception as e:
             raise e
@@ -200,6 +203,17 @@ class CnaasCliApp(cmd2.Cmd):
                             return []
                         elif idx == 0:
                             current_field = f_root.model_fields[token]
+                            if current_field.annotation._name == 'Optional':
+                                print(f"first optional: {current_field.annotation.__args__[0]}")
+                                current_field = current_field.annotation.__args__[0]
+#                                if is_last_token:
+#                                    return self.complete_last_token(current_field, tokens[index])
+#                                if not hasattr(current_field, 'annotation'):
+#                                    pass
+#                                elif current_field.annotation._name == 'Dict':
+#                                    inspect_dict = True
+#                                elif current_field.annotation._name == 'List':
+#                                    inspect_list = True
                         elif idx > 0:
                             if inspect_dict:
                                 current_field = current_field.model_fields[token]
@@ -217,7 +231,8 @@ class CnaasCliApp(cmd2.Cmd):
 #                            print(type(current_field))
 
                             if not hasattr(current_field, 'annotation'):
-                                return []
+                                # try to complete from yaml data instead of model
+                                continue
                             if current_field.annotation == bool:
                                 print(f"\n{token}: {current_field.description}")
                                 cmd2.cmd2.rl_force_redisplay()
@@ -237,10 +252,12 @@ class CnaasCliApp(cmd2.Cmd):
                                     cmd2.cmd2.rl_force_redisplay()
                                 current_field = current_field.annotation.__args__[0]
                                 print(f"in optional: {current_field} type: {type(current_field)}")
-#                                if current_field.annotation._name == 'Dict':
-#                                    inspect_dict = True
-#                                elif current_field.annotation._name == 'List':
-#                                    inspect_list = True
+                                if not hasattr(current_field, 'annotation'):
+                                    continue
+                                if current_field.annotation._name == 'Dict':
+                                    inspect_dict = True
+                                elif current_field.annotation._name == 'List':
+                                    inspect_list = True
                                 if is_last_token:
                                     return self.complete_last_token(current_field, tokens[index])
                             #                                    return [cur_match for cur_match in current_field.model_fields.keys() if cur_match.startswith(tokens[index])]
@@ -248,15 +265,17 @@ class CnaasCliApp(cmd2.Cmd):
                                 current_field = current_field.annotation.__args__[0]
                                 print("DEBUG list")
                                 if is_last_token:
+                                    continue
                                     return [cur_match for cur_match in current_field.model_fields.keys() if
                                             cur_match.startswith(tokens[index])]
                                 else:
-                                    inspect_list = True
+                                    pass
+                                    #inspect_list = True
                             elif current_field.annotation._name == 'Dict':
                                 current_field = current_field.annotation.__args__[1]
-##                                print("DEBUG dict")
+#                                print("DEBUG dict")
                                 if is_last_token:
-                                    return current_field.model_fields.keys()
+                                    return [cur_match for cur_match in current_field.model_fields.keys() if cur_match.startswith(tokens[index])]
                                 else:
                                     inspect_dict = True
                             else:
@@ -338,7 +357,9 @@ class CnaasCliApp(cmd2.Cmd):
                 token = find_dict_by_key(yaml_item, next_find_dict_key, token)
                 next_find_dict_key = None
 
-            if token in yaml_item:
+            if isinstance(yaml_item, list) and token < len(yaml_item):
+                yaml_item = yaml_item[token]
+            elif token in yaml_item:
                 yaml_item = yaml_item[token]
             if is_list_of_dicts(yaml_item, "name"):
                 next_find_dict_key = "name"
@@ -365,8 +386,10 @@ class CnaasCliApp(cmd2.Cmd):
 
         if set_value.isdigit():
             set_value = int(set_value)
+        old_value = yaml_item[argv[-1]]
         yaml_item[argv[-1]] = set_value
-        return token_path
+        token_path.append(argv[-1])
+        return token_path, old_value
 
     def complete_set(self, text, line, begidx, endidx):
         return self.settings_complete(text, line, begidx, endidx, suggest_set=True)
@@ -405,25 +428,29 @@ class CnaasCliApp(cmd2.Cmd):
                 if len(statement.argv) == 2:
                     console.log("You must specify a setting to change")
                 elif len(statement.argv) >= 3:
-                    yaml_item = self.yaml_get_helper(statement.argv[:-1], text)
+                    #yaml_item = self.yaml_get_helper(statement.argv[:-1], text)
 
-                    string_stream = StringIO()
-                    yaml.dump(yaml_item, string_stream)
-                    yaml_str = string_stream.getvalue().removesuffix("\n...\n").strip()
+                    #string_stream = StringIO()
+                    #yaml.dump(yaml_item, string_stream)
+                    #yaml_str = string_stream.getvalue().removesuffix("\n...\n").strip()
 
                     set_value = statement.argv[-1]
-                    if yaml_str == set_value:
-                        print("same")
-                        continue
+                    #if yaml_str == set_value:
+                    #    print("same")
+                    #    continue
 
                     yaml_item = yaml.load(text)
-                    token_path = self.yaml_set_helper(statement.argv[:-1], yaml_item, set_value)
+                    token_path, old_value = self.yaml_set_helper(statement.argv[:-1], yaml_item, set_value)
                     try:
                         f_root(**yaml_item).model_dump()
                     except Exception as e:
                         console.log(f"Error: {e}")
                         continue
-                    console.log(f"{' -> '.join([str(x) for x in token_path])} set to {set_value}")
+                    if old_value == set_value:
+                        breakpoint()
+                        console.log("Value unchanged")
+                    else:
+                        console.log(f"{' -> '.join([str(x) for x in token_path])} was updated: {old_value} -> [bold red]{set_value}[/bold red]")
 
                     with open(filename, "wb") as f:
                         yaml.dump(yaml_item, f)
