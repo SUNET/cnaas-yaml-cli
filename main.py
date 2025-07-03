@@ -92,6 +92,12 @@ def is_list_of_dicts(obj: Any, find_key: str):
 #        return obj
 
 
+def is_list_of_dicts_field(obj):
+    if hasattr(obj, 'annotation') and obj.annotation._name == 'List' and hasattr(obj.annotation.__args__[0], 'model_fields'):
+        return True
+    return False
+
+
 def find_dict_by_key(obj, find_key, name, setter=False):
     for i, interface in enumerate(obj):
         if interface[find_key] == name:
@@ -134,7 +140,10 @@ class CnaasCliApp(cmd2.Cmd):
             return []
         if current_field == int:
             return []
-        return [cur_match for cur_match in current_field.model_fields.keys() if cur_match.startswith(last_token)]
+        if hasattr(current_field, "model_fields"):
+            return [cur_match for cur_match in current_field.model_fields.keys() if cur_match.startswith(last_token)]
+        else:
+            return []
 
     def get_next_yaml_item(self, tokens, token, yaml_item):
         try:
@@ -195,8 +204,7 @@ class CnaasCliApp(cmd2.Cmd):
                     if len(token_path) == 0:
                         return [cur_match for cur_match in f_root.model_fields.keys() if cur_match.startswith(tokens[index])]
                     current_field = f_root
-                    inspect_dict = False
-                    inspect_list = False
+                    inspect_inner = False
                     print()
                     for idx, token in enumerate(token_path):
                         is_last_token = idx == len(token_path) - 1
@@ -218,15 +226,9 @@ class CnaasCliApp(cmd2.Cmd):
 #                                elif current_field.annotation._name == 'List':
 #                                    inspect_list = True
                         elif idx > 0:
-                            if inspect_dict:
+                            if inspect_inner:
                                 current_field = current_field.model_fields[token]
-                                inspect_dict = False
-                            if inspect_list:
-                                inspect_list = False
-#                                if is_last_token:
-#                                    return [cur_match for cur_match in current_field.model_fields.keys() if cur_match.startswith(tokens[index])]
-#                                else:
-                                current_field = current_field.model_fields[token]
+                                inspect_inner = False
 
 #                            print("DEBUG4")
                             print(f"{current_field} type: {type(current_field)}")
@@ -254,32 +256,37 @@ class CnaasCliApp(cmd2.Cmd):
                                     print(f"\n{token} (optional): {current_field.description}")
                                     cmd2.cmd2.rl_force_redisplay()
                                 current_field = current_field.annotation.__args__[0]
-                                print(f"in optional: {current_field} type: {type(current_field)}")
-                                if not hasattr(current_field, 'annotation'):
-                                    continue
-                                if current_field.annotation._name == 'Dict':
-                                    inspect_dict = True
-                                elif current_field.annotation._name == 'List':
-                                    inspect_list = True
+#                                print(f"in optional: {current_field} type: {type(current_field)}")
+                                if hasattr(current_field, 'annotation') and current_field.annotation._name in ['Dict', 'List']:
+                                    inspect_inner = True
                                 if is_last_token:
                                     return self.complete_last_token(current_field, tokens[index])
                             #                                    return [cur_match for cur_match in current_field.model_fields.keys() if cur_match.startswith(tokens[index])]
                             if current_field.annotation._name == 'List':
+                                list_of_dicts = is_list_of_dicts_field(current_field)
                                 current_field = current_field.annotation.__args__[0]
                                 print("DEBUG list")
                                 if is_last_token:
+                                    # for interfaces, we should complete interface options
+                                    #breakpoint()
+                                    if not list_of_dicts:
+                                        continue
                                     return [cur_match for cur_match in current_field.model_fields.keys() if
                                             cur_match.startswith(tokens[index])]
+                                    #continue
                                 else:
-                                    pass
-                                    #inspect_list = True
+                                    ### pass
+                                    # do inspect interfaces, but not statements?? because interfaces is converted to dict?
+                                    print(f"DEBUG5: {token}: {current_field}")
+                                    if list_of_dicts:
+                                        inspect_inner = True
                             elif current_field.annotation._name == 'Dict':
                                 current_field = current_field.annotation.__args__[1]
 #                                print("DEBUG dict")
                                 if is_last_token:
                                     return [cur_match for cur_match in current_field.model_fields.keys() if cur_match.startswith(tokens[index])]
                                 else:
-                                    inspect_dict = True
+                                    inspect_inner = True
                             else:
                                 if is_last_token:
 ##                                    print("DEBUG2")
@@ -387,15 +394,23 @@ class CnaasCliApp(cmd2.Cmd):
 
             token_path.append(token)
             try:
-                yaml_item = yaml_item[token]
+                yaml_item[token]
             except (KeyError, IndexError, TypeError):
                 new_key = True
+            else:
+                # don't update yaml_item for last token, since we want to update mutable object dict/list instead of immutable object str/int/bool
+                if dict_level != len(argv) - 1:
+                    yaml_item = yaml_item[token]
 
             if is_list_of_dicts(yaml_item, "name"):
                 next_find_dict_key = "name"
-            elif isinstance(yaml_item, list) or (len(token_path) >= 3 and token_path[0] == "interfaces" and token_path[2] == "tagged_vlan_list"):
+            # if last element in yaml is a list, or if pydantic model thinks it should become a list
+            elif (isinstance(yaml_item, list) and dict_level == len(argv)-1) or (len(token_path) >= 3 and token_path[0] == "interfaces" and token_path[2] == "tagged_vlan_list"):
                 print("Appending to list")
                 next_append_list = True
+                # if list already exists, update yaml_item so old_value will be old list
+                if not new_key and isinstance(yaml_item[token], list):
+                    yaml_item = yaml_item[token]
 
         if set_value.isdigit():
             set_value = int(set_value)
@@ -413,7 +428,10 @@ class CnaasCliApp(cmd2.Cmd):
                 yaml_item.append(set_value)
                 final_set_value = yaml_item
         else:
-            yaml_item[argv[-1]] = set_value
+            if token == "config":
+                yaml_item[argv[-1]] = ruamel.yaml.scalarstring.LiteralScalarString(set_value)
+            else:
+                yaml_item[argv[-1]] = set_value
         token_path.append(argv[-1])
         return token_path, old_value, final_set_value
 
