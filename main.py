@@ -92,10 +92,13 @@ def is_list_of_dicts(obj: Any, find_key: str):
 #        return obj
 
 
-def find_dict_by_key(obj, find_key, name):
+def find_dict_by_key(obj, find_key, name, setter=False):
     for i, interface in enumerate(obj):
         if interface[find_key] == name:
             return i
+    if setter:
+        obj.append({find_key: name})
+        return len(obj) - 1
     return None
 
 
@@ -265,7 +268,6 @@ class CnaasCliApp(cmd2.Cmd):
                                 current_field = current_field.annotation.__args__[0]
                                 print("DEBUG list")
                                 if is_last_token:
-                                    continue
                                     return [cur_match for cur_match in current_field.model_fields.keys() if
                                             cur_match.startswith(tokens[index])]
                                 else:
@@ -365,31 +367,55 @@ class CnaasCliApp(cmd2.Cmd):
                 next_find_dict_key = "name"
         return yaml_item
 
-    def yaml_set_helper(self, argv, yaml_item, set_value):
+    def yaml_set_helper(self, argv, yaml_item, set_value=None):
         token_path = []
 
         next_find_dict_key = None
-        for dict_level in range(2, len(argv)-1):
+        next_append_list = False
+        new_key = False
+        final_set_value = set_value
+        for dict_level in range(2, len(argv)):
+            next_append_list = False
             token = argv[dict_level]
 
             if token.isdigit():
                 token = int(token)
 
             if next_find_dict_key is not None:
-                token = find_dict_by_key(yaml_item, next_find_dict_key, token)
+                token = find_dict_by_key(yaml_item, next_find_dict_key, token, setter=True)
                 next_find_dict_key = None
 
             token_path.append(token)
-            yaml_item = yaml_item[token]
+            try:
+                yaml_item = yaml_item[token]
+            except (KeyError, IndexError, TypeError):
+                new_key = True
+
             if is_list_of_dicts(yaml_item, "name"):
                 next_find_dict_key = "name"
+            elif isinstance(yaml_item, list) or (len(token_path) >= 3 and token_path[0] == "interfaces" and token_path[2] == "tagged_vlan_list"):
+                print("Appending to list")
+                next_append_list = True
 
         if set_value.isdigit():
             set_value = int(set_value)
-        old_value = yaml_item[argv[-1]]
-        yaml_item[argv[-1]] = set_value
+        if new_key:
+            old_value = None
+        elif next_append_list:
+            old_value = copy(yaml_item)
+        else:
+            old_value = copy(yaml_item[argv[-1]])
+        if next_append_list:
+            if new_key:
+                yaml_item[argv[-1]] = [set_value]
+                final_set_value = yaml_item[argv[-1]]
+            elif isinstance(yaml_item, list):
+                yaml_item.append(set_value)
+                final_set_value = yaml_item
+        else:
+            yaml_item[argv[-1]] = set_value
         token_path.append(argv[-1])
-        return token_path, old_value
+        return token_path, old_value, final_set_value
 
     def complete_set(self, text, line, begidx, endidx):
         return self.settings_complete(text, line, begidx, endidx, suggest_set=True)
@@ -440,17 +466,16 @@ class CnaasCliApp(cmd2.Cmd):
                     #    continue
 
                     yaml_item = yaml.load(text)
-                    token_path, old_value = self.yaml_set_helper(statement.argv[:-1], yaml_item, set_value)
+                    token_path, old_value, final_set_value = self.yaml_set_helper(statement.argv[:-1], yaml_item, set_value)
                     try:
                         f_root(**yaml_item).model_dump()
                     except Exception as e:
                         console.log(f"Error: {e}")
                         continue
-                    if old_value == set_value:
-                        breakpoint()
+                    if old_value == final_set_value:
                         console.log("Value unchanged")
                     else:
-                        console.log(f"{' -> '.join([str(x) for x in token_path])} was updated: {old_value} -> [bold red]{set_value}[/bold red]")
+                        console.log(f"{' -> '.join([str(x) for x in token_path])} was updated: {old_value} -> [bold red]{final_set_value}[/bold red]")
 
                     with open(filename, "wb") as f:
                         yaml.dump(yaml_item, f)
