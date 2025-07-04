@@ -10,6 +10,7 @@ from io import StringIO
 
 import cmd2
 import ruamel.yaml
+from cmd2 import CompletionItem
 from git.exc import InvalidGitRepositoryError
 from rich.console import Console
 
@@ -124,14 +125,47 @@ class CnaasCliApp(cmd2.Cmd):
 
     def __init__(self):
         super().__init__()
+        self.validate_repo()
+        self._set_prompt()
+        self.register_precmd_hook(self.color_prompt_input)
         self.repo = Settingsrepo(os.getcwd())
-        self.prompt = "yaml-cli> "
+        #self.prompt = "yaml-cli> "
         self.debug = True
         remove_bulitins = ["do_shell", "do_run_pyscript", "do_run_script", "do_edit", "do_shortcuts", "do_set"]
         setattr(self, "do_cli_set", super(CnaasCliApp, self).do_set)
+#        setattr(self, "do_commit-and-push", self.do_commit_and_push)
 #        setattr(self, "complete_cli_set", super(CnaasCliApp, self).complete_set_value)
         for cmd in remove_bulitins:
             delattr(cmd2.Cmd, cmd)
+
+    def color_prompt_input(self, data: cmd2.plugin.PrecommandData) -> cmd2.plugin.PrecommandData:
+        print(data.statement)
+        return data
+
+    def _set_prompt(self) -> None:
+        """Set prompt so it displays the current working directory."""
+        self.cwd = os.getcwd()
+        color = cmd2.ansi.Fg.RED
+        if self.valid_repo:
+            if self.repo.repo.is_dirty():
+                color = cmd2.ansi.Fg.LIGHT_CYAN
+            else:
+                color = cmd2.ansi.Fg.GREEN
+            path = os.path.split(self.cwd)[-1]
+        else:
+            path = self.cwd
+        self.prompt = cmd2.ansi.style(path, fg=color, bold=True) + ' > '
+
+    def postcmd(self, stop: bool, _line: str) -> bool:
+        """Hook method executed just after a command dispatch is finished.
+
+        :param stop: if True, the command has indicated the application should exit
+        :param line: the command line text for this command
+        :return: if this is True, the application will exit after this command and the postloop() will run
+        """
+        """Override this so prompt always displays cwd."""
+        self._set_prompt()
+        return stop
 
     def complete_last_token(self, current_field, last_token):
         if current_field == bool:
@@ -144,6 +178,17 @@ class CnaasCliApp(cmd2.Cmd):
             return [cur_match for cur_match in current_field.model_fields.keys() if cur_match.startswith(last_token)]
         else:
             return []
+
+    def complete_ifclass(self, tokens, index):
+        ifclasses = ['custom', 'downlink', 'fabric', 'mirror']
+        try:
+            with open(os.path.join(self.cwd, "global", "base_system.yml")) as f:
+                base_system_data = yaml.load(f)
+                if "port_template_options" in base_system_data:
+                    ifclasses.extend([f"port_template_{name}" for name in base_system_data["port_template_options"].keys()])
+        except Exception:
+            pass
+        return [cur_match for cur_match in ifclasses if cur_match.startswith(tokens[index])]
 
     def get_next_yaml_item(self, tokens, token, yaml_item):
         try:
@@ -162,6 +207,12 @@ class CnaasCliApp(cmd2.Cmd):
             if isinstance(yaml_item, dict) and token in yaml_item:
                 return yaml_item[token]
 
+    def color_paths(self, completions: list[str]) -> list[str]:
+        #if len(completions) == 1:
+        #    return [cmd2.ansi.style(f"{completions[0]}", fg=cmd2.Fg.GREEN)]
+        return completions
+
+
     def settings_complete(
             self,
             text: str,
@@ -179,7 +230,7 @@ class CnaasCliApp(cmd2.Cmd):
         index = len(tokens) - 1
 
         if index == 1:
-            return self.path_complete(text, line, begidx, endidx)
+            return self.color_paths(self.path_complete(text, line, begidx, endidx))
 
         try:
             # first token is the command, second is the file name
@@ -205,17 +256,17 @@ class CnaasCliApp(cmd2.Cmd):
                         return [cur_match for cur_match in f_root.model_fields.keys() if cur_match.startswith(tokens[index])]
                     current_field = f_root
                     inspect_inner = False
-                    print()
+                    #print()
                     for idx, token in enumerate(token_path):
                         is_last_token = idx == len(token_path) - 1
-                        print(f"DEBUG idx: {idx}, token: {token}, {len(token_path)}, last = {is_last_token}, yaml_item: {str(yaml_item)[:20]}")
+                        #print(f"DEBUG idx: {idx}, token: {token}, {len(token_path)}, last = {is_last_token}, yaml_item: {str(yaml_item)[:20]}")
                         if idx == 0 and token not in f_root.model_fields:
                             console.log("Unknown setting: {token}")
                             return []
                         elif idx == 0:
                             current_field = f_root.model_fields[token]
                             if current_field.annotation._name == 'Optional':
-                                print(f"first optional: {current_field.annotation.__args__[0]}")
+                                #print(f"first optional: {current_field.annotation.__args__[0]}")
                                 current_field = current_field.annotation.__args__[0]
 #                                if is_last_token:
 #                                    return self.complete_last_token(current_field, tokens[index])
@@ -231,7 +282,7 @@ class CnaasCliApp(cmd2.Cmd):
                                 inspect_inner = False
 
 #                            print("DEBUG4")
-                            print(f"{current_field} type: {type(current_field)}")
+                            #print(f"{current_field} type: {type(current_field)}")
 #                            print(dir(current_field))
 #                            print(type(current_field))
 
@@ -245,7 +296,10 @@ class CnaasCliApp(cmd2.Cmd):
                             elif current_field.annotation == str:
                                 print(f"\n{token}: {current_field.description}")
                                 cmd2.cmd2.rl_force_redisplay()
-                                return []
+                                if is_last_token and token_path[0] == 'interfaces' and token_path[2] == 'ifclass':
+                                    return self.complete_ifclass(tokens, index)
+                                else:
+                                    return []
                             elif current_field.annotation == int:
                                 print(f"\n{token}: {current_field.description}")
                                 cmd2.cmd2.rl_force_redisplay()
@@ -265,7 +319,7 @@ class CnaasCliApp(cmd2.Cmd):
                             if current_field.annotation._name == 'List':
                                 list_of_dicts = is_list_of_dicts_field(current_field)
                                 current_field = current_field.annotation.__args__[0]
-                                print("DEBUG list")
+                                #print("DEBUG list")
                                 if is_last_token:
                                     # for interfaces, we should complete interface options
                                     #breakpoint()
@@ -277,7 +331,7 @@ class CnaasCliApp(cmd2.Cmd):
                                 else:
                                     ### pass
                                     # do inspect interfaces, but not statements?? because interfaces is converted to dict?
-                                    print(f"DEBUG5: {token}: {current_field}")
+                                    #print(f"DEBUG5: {token}: {current_field}")
                                     if list_of_dicts:
                                         inspect_inner = True
                             elif current_field.annotation._name == 'Dict':
@@ -299,11 +353,13 @@ class CnaasCliApp(cmd2.Cmd):
 #                            return []
 
                     # DEBUG:
-                    cmd2.cmd2.rl_force_redisplay()
+                    #cmd2.cmd2.rl_force_redisplay()
                 if isinstance(yaml_item, list):
                     return [cur_match for cur_match in list(map(str, range(len(yaml_item)))) if cur_match.startswith(tokens[index])]
                 elif isinstance(yaml_item, dict):
                     available_options = set(yaml_item.keys())
+                    #test color, not working available_options = set([cmd2.ansi.style(item, bold=True) for item in yaml_item.keys()])
+                    #argparse completer can do styling, how? available_options = [CompletionItem(idx, value) for idx, value in enumerate(yaml_item.keys())]
 #                    if suggest_set:
 #                        a = f_root.model_fields['interfaces'].annotation.__args__[0]
 #                        available_options.update(a.model_fields.keys())
@@ -333,6 +389,16 @@ class CnaasCliApp(cmd2.Cmd):
         """Pull settingsrepo"""
         self.repo.pull()
 
+    def validate_repo(self, quiet=True):
+        try:
+            self.repo = Settingsrepo(os.getcwd())
+            self.valid_repo = True
+        except InvalidGitRepositoryError:
+            if not quiet:
+                console.log("Not a git repository")
+            self.valid_repo = False
+
+
     def do_cd(self, args):
         """Change directory"""
         if not args:
@@ -344,10 +410,46 @@ class CnaasCliApp(cmd2.Cmd):
         else:
             os.chdir(newdir)
             console.log(f"Changed directory to {os.getcwd()}")
-        try:
-            self.repo = Settingsrepo(os.getcwd())
-        except InvalidGitRepositoryError:
-            console.log("Not a git repository")
+        self.validate_repo(quiet=False)
+
+    def do_initdevice(self, statement: cmd2.Statement):
+        """Initialize a device"""
+        if not self.valid_repo:
+            console.log("Not a valid git repository")
+            return
+        if not statement.argv or len(statement.argv) != 2:
+            console.log("Usage: initdevice <device_hostname>")
+            return
+        device_hostname = statement.argv[1]
+        newpath = os.path.join(self.cwd, "devices", device_hostname)
+        os.mkdir(newpath)
+        os.mknod(os.path.join(newpath, "interfaces.yml"))
+        os.mknod(os.path.join(newpath, "routing.yml"))
+        os.mknod(os.path.join(newpath, "base_system.yml"))
+        empty_int = {'interfaces': []}
+        with open(os.path.join(newpath, "interfaces.yml"), "w") as f:
+            yaml.dump(empty_int, f)
+        self.repo.repo.index.add([os.path.join(newpath, "interfaces.yml")])
+        self.repo.repo.index.add([os.path.join(newpath, "routing.yml")])
+        self.repo.repo.index.add([os.path.join(newpath, "base_system.yml")])
+
+    def do_commit(self, statement: cmd2.Statement):
+        if not self.valid_repo:
+            console.log("Not a valid git repository")
+            return
+        if not self.repo.repo.is_dirty():
+            console.log("Working tree is clean, nothing to commit")
+            return
+        self.do_diff(statement)
+        message = input("Enter commit message: ")
+        with console.status("Committing changes"):
+            ret = self.repo.repo.git.commit("-a", "-m", message)
+            print(ret)
+
+    def do_commit_and_push(self, statement: cmd2.Statement):
+        self.do_commit(statement)
+        with console.status("Pushing changes"):
+            self.repo.repo.git.push()
 
     def complete_show(self, text, line, begidx, endidx):
         return self.settings_complete(text, line, begidx, endidx)
@@ -380,6 +482,7 @@ class CnaasCliApp(cmd2.Cmd):
         next_find_dict_key = None
         next_append_list = False
         new_key = False
+        new_parent_key = False
         final_set_value = set_value
         for dict_level in range(2, len(argv)):
             next_append_list = False
@@ -396,7 +499,10 @@ class CnaasCliApp(cmd2.Cmd):
             try:
                 yaml_item[token]
             except (KeyError, IndexError, TypeError):
-                new_key = True
+                if dict_level == len(argv) - 1:
+                    new_key = True
+                elif dict_level == len(argv) - 2:
+                    new_parent_key = True
             else:
                 # don't update yaml_item for last token, since we want to update mutable object dict/list instead of immutable object str/int/bool
                 if dict_level != len(argv) - 1:
@@ -405,8 +511,9 @@ class CnaasCliApp(cmd2.Cmd):
             if is_list_of_dicts(yaml_item, "name"):
                 next_find_dict_key = "name"
             # if last element in yaml is a list, or if pydantic model thinks it should become a list
+            # TODO: generic way
             elif (isinstance(yaml_item, list) and dict_level == len(argv)-1) or (len(token_path) >= 3 and token_path[0] == "interfaces" and token_path[2] == "tagged_vlan_list"):
-                print("Appending to list")
+                #print("Appending to list")
                 next_append_list = True
                 # if list already exists, update yaml_item so old_value will be old list
                 if not new_key and isinstance(yaml_item[token], list):
@@ -428,6 +535,9 @@ class CnaasCliApp(cmd2.Cmd):
                 yaml_item.append(set_value)
                 final_set_value = yaml_item
         else:
+            if new_parent_key:
+                yaml_item[token_path[-2]] = {}
+                yaml_item = yaml_item[token_path[-2]]
             if token == "config":
                 yaml_item[argv[-1]] = ruamel.yaml.scalarstring.LiteralScalarString(set_value)
             else:
@@ -489,7 +599,11 @@ class CnaasCliApp(cmd2.Cmd):
                         f_root(**yaml_item).model_dump()
                     except Exception as e:
                         console.log(f"Error: {e}")
-                        continue
+                        console.print("Repository syntax reference:")
+                        console.print("https://cnaas-nms.readthedocs.io/en/latest/reporef/index.html")
+                        continue_anyway = input("Syntax did not validate. Set value anyway? [y/N] ")
+                        if continue_anyway.lower() != "y":
+                            continue
                     if old_value == final_set_value:
                         console.log("Value unchanged")
                     else:
@@ -512,7 +626,7 @@ if __name__ == '__main__':
     #repo = Settingsrepo(os.getcwd())
     #repo.pull()
 
-
-
+    setattr(CnaasCliApp, "do_commit-and-push", CnaasCliApp.do_commit_and_push)
+    del CnaasCliApp.do_commit_and_push
     c = CnaasCliApp()
     sys.exit(c.cmdloop())
