@@ -1,17 +1,16 @@
 #!/usr/bin/env python
 """A simple cmd2 application."""
 import glob
-import typing
 from copy import copy
-from typing import Any
+from typing import Any, Optional
 import functools
 import os
 from io import StringIO
 
 import cmd2
 import ruamel.yaml
-from cmd2 import CompletionItem
-from git.exc import InvalidGitRepositoryError
+import pydantic
+from git.exc import InvalidGitRepositoryError, GitCommandError
 from rich.console import Console
 
 from settingsrepo import Settingsrepo
@@ -22,6 +21,7 @@ yaml = ruamel.yaml.YAML()
 yaml.indent(sequence=4, offset=2)
 yaml.default_flow_style = False
 yaml.preserve_quotes = True
+yaml.width = 1000
 
 console = Console()
 
@@ -47,6 +47,34 @@ def yaml_key_complete(
 #    if ((os.path.isfile(f) and f.endswith(".yml")) or os.path.isdir(f)) and f.startswith(
 #        text) and not f.startswith(".")
 #]
+
+
+def get_pydantic_type(token_path: list[str]):
+    current_field = f_root
+    next_list_or_dict = None
+    prev_type = None
+    for token in token_path:
+        if next_list_or_dict:
+            current_field = current_field.model_fields[next_list_or_dict]
+            next_list_or_dict = None
+            continue
+        if hasattr(current_field, "model_fields"):
+            current_field = current_field.model_fields[token]
+        elif hasattr(current_field, "annotation"):
+            annotation = current_field.annotation
+            if annotation._name == 'Optional':
+                current_field = current_field.annotation.__args__[0]
+                next_list_or_dict = token
+
+            if annotation._name == "List":
+                prev_type = list
+                current_field = annotation.__args__[0]
+        else:
+            break
+    print(current_field)
+    if hasattr(current_field, "model_fields"):
+        return prev_type, dict
+    return current_field
 
 
 def convert_list_of_dicts(obj: Any, find_key: str):
@@ -190,22 +218,52 @@ class CnaasCliApp(cmd2.Cmd):
             pass
         return [cur_match for cur_match in ifclasses if cur_match.startswith(tokens[index])]
 
-    def get_next_yaml_item(self, tokens, token, yaml_item):
+    def get_next_yaml_item(self, tokens, token, yaml_item, convert=True) -> (Any, Optional[str]):
+        list_of_dicts_keys = [
+            {"path": ["interfaces"], "primary_key": "name"},
+            {"path": ["extroute_bgp", "vrfs"], "primary_key": "name"},
+            {"path": ["extroute_static", "vrfs"], "primary_key": "name"},
+            {"path": ["extroute_bgp", "vrfs", "*", "neighbor_v4"], "primary_key": "peer_ipv4"},
+            {"path": ["ntp_servers"], "primary_key": "host"},
+            {"path": ["syslog_servers"], "primary_key": "host"},
+            {"path": ["radius_servers"], "primary_key": "host"},
+
+        ]
         try:
-            if len(tokens) >= 4 and isinstance(token, str) and token == "interfaces":
-                return convert_list_of_dicts(yaml_item[token], "name")
-            elif len(tokens) >= 5 and isinstance(token, str) and token == "vrfs":
-                return convert_list_of_dicts(yaml_item[token], "name")
+            path_start_index = 2
+            primary_key = None
+            for item in list_of_dicts_keys:
+                for i in range(0, len(tokens)-path_start_index):
+                    if item["path"][i] == "*":
+                        continue
+                    if not isinstance(tokens[i+path_start_index], str):
+                        break
+                    if item["path"][i] == tokens[i+path_start_index] and i == len(item["path"])-1:
+                        if tokens[i+path_start_index] == token:
+                            primary_key = item["primary_key"]
+                            if convert:
+                                return convert_list_of_dicts(yaml_item[token], item["primary_key"]), item["primary_key"]
+                        break
+                    if item["path"][i] != tokens[i+path_start_index]:
+                        break
+
+
+#            if len(tokens) >= 4 and isinstance(token, str) and token == "interfaces":
+#                return convert_list_of_dicts(yaml_item[token], "name")
+#            elif len(tokens) >= 5 and isinstance(token, str) and token == "vrfs":
+#                return convert_list_of_dicts(yaml_item[token], "name")
             # TODO: neighbor_v4
-            else:
-                if isinstance(yaml_item, list) and token < len(yaml_item):
-                    return yaml_item[token]
-                elif isinstance(yaml_item, dict) and token in yaml_item:
-                    return yaml_item[token]
+            #else:
+                #prev = get_pydantic_type(tokens[2:])
+            if isinstance(yaml_item, list) and token < len(yaml_item):
+                return yaml_item[token], primary_key
+            elif isinstance(yaml_item, dict) and token in yaml_item:
+                return yaml_item[token], primary_key
+            return None, None
         except Exception as e:
             raise e
             if isinstance(yaml_item, dict) and token in yaml_item:
-                return yaml_item[token]
+                return yaml_item[token], primary_key
 
     def color_paths(self, completions: list[str]) -> list[str]:
         #if len(completions) == 1:
@@ -240,14 +298,15 @@ class CnaasCliApp(cmd2.Cmd):
                 token_path = []
                 # if there are more tokens, we need to dig into the yaml
                 # structure to find the right list or dict to complete
-                for dict_level in range(3, len(tokens)):
-                    token = tokens[dict_level-1]
+                for dict_level in range(2, len(tokens)-1):
+                    token = tokens[dict_level]
                     if token.isdigit():
                         token = int(token)
                     #TODO:
                     # check if yaml_item[token] is a list of dictionaries where all dictionaries have the key name
                     token_path.append(token)
-                    yaml_item = self.get_next_yaml_item(tokens, token, yaml_item)
+                    yaml_item, _ = self.get_next_yaml_item(tokens, token, yaml_item)
+                current_token = tokens[len(tokens)-1]
 
                 ##                print(token_path)
                 # if suggest set, walk according to the model fields
@@ -286,26 +345,42 @@ class CnaasCliApp(cmd2.Cmd):
 #                            print(dir(current_field))
 #                            print(type(current_field))
 
+                            if is_last_token and (hasattr(current_field, 'model_fields') or hasattr(current_field, "annotation") ):
+                                current_subfield = None
+                                if hasattr(current_field, "annotation") and current_field.annotation in [int, bool, str]:
+                                    current_subfield = current_field
+                                elif hasattr(current_field, "model_fields") and token in current_field.model_fields:
+                                    current_subfield = current_field.model_fields[token]
+                                if current_subfield:
+                                    current_subfield_type = None
+                                    if hasattr(current_subfield, "annotation") and hasattr(current_subfield.annotation, "_name") and current_subfield.annotation._name == "Optional":
+                                        current_subfield_type = current_subfield.annotation.__args__[0]
+                                    if current_subfield_type == bool or current_subfield.annotation == bool:
+                                        print(f"\n{token}: {current_subfield.description}")
+                                        cmd2.cmd2.rl_force_redisplay()
+                                        return [cur_match for cur_match in ['true', 'false'] if
+                                                cur_match.startswith(tokens[index])]
+                                    elif current_subfield_type == str or current_subfield.annotation == str:
+                                        print(f"\n{token}: {current_subfield.description}")
+                                        cmd2.cmd2.rl_force_redisplay()
+                                        if is_last_token and token_path[0] == 'interfaces' and token_path[2] == 'ifclass':
+                                            return self.complete_ifclass(tokens, index)
+                                        else:
+                                            return []
+                                    elif current_subfield_type == int or current_subfield.annotation == int:
+                                        print(f"\n{token}: {current_subfield.description}")
+                                        cmd2.cmd2.rl_force_redisplay()
+                                        return []
+                            #                            current_field = current_field.model_fields
                             if not hasattr(current_field, 'annotation'):
                                 # try to complete from yaml data instead of model
-                                continue
-                            if current_field.annotation == bool:
-                                print(f"\n{token}: {current_field.description}")
-                                cmd2.cmd2.rl_force_redisplay()
-                                return [cur_match for cur_match in ['true', 'false'] if cur_match.startswith(tokens[index])]
-                            elif current_field.annotation == str:
-                                print(f"\n{token}: {current_field.description}")
-                                cmd2.cmd2.rl_force_redisplay()
-                                if is_last_token and token_path[0] == 'interfaces' and token_path[2] == 'ifclass':
-                                    return self.complete_ifclass(tokens, index)
+                                if hasattr(current_field, 'model_fields'):
+                                    current_field = current_field.model_fields[token]
                                 else:
-                                    return []
-                            elif current_field.annotation == int:
-                                print(f"\n{token}: {current_field.description}")
-                                cmd2.cmd2.rl_force_redisplay()
-                                return []
-#                            current_field = current_field.model_fields
-                            if current_field.annotation._name == 'Optional':
+                                    print("WHAATA")
+                                    inspect_inner = True
+                                continue
+                            if hasattr(current_field.annotation, "_name") and current_field.annotation._name == 'Optional':
                                 if is_last_token:
                                     print(f"\n{token} (optional): {current_field.description}")
                                     cmd2.cmd2.rl_force_redisplay()
@@ -316,7 +391,7 @@ class CnaasCliApp(cmd2.Cmd):
                                 if is_last_token:
                                     return self.complete_last_token(current_field, tokens[index])
                             #                                    return [cur_match for cur_match in current_field.model_fields.keys() if cur_match.startswith(tokens[index])]
-                            if current_field.annotation._name == 'List':
+                            if hasattr(current_field.annotation, "_name") and current_field.annotation._name == 'List':
                                 list_of_dicts = is_list_of_dicts_field(current_field)
                                 current_field = current_field.annotation.__args__[0]
                                 #print("DEBUG list")
@@ -333,12 +408,14 @@ class CnaasCliApp(cmd2.Cmd):
                                     # do inspect interfaces, but not statements?? because interfaces is converted to dict?
                                     #print(f"DEBUG5: {token}: {current_field}")
                                     if list_of_dicts:
-                                        inspect_inner = True
-                            elif current_field.annotation._name == 'Dict':
+                                        pass
+#                                        if not is_last_token:
+#                                            inspect_inner = True
+                            elif hasattr(current_field.annotation, "_name") and current_field.annotation._name == 'Dict':
                                 current_field = current_field.annotation.__args__[1]
 #                                print("DEBUG dict")
                                 if is_last_token:
-                                    return [cur_match for cur_match in current_field.model_fields.keys() if cur_match.startswith(tokens[index])]
+                                    return self.complete_last_token(current_field, tokens[index])
                                 else:
                                     inspect_inner = True
                             else:
@@ -451,6 +528,21 @@ class CnaasCliApp(cmd2.Cmd):
         with console.status("Pushing changes"):
             self.repo.repo.git.push()
 
+    def do_find(self, statement: cmd2.Statement):
+        if not self.valid_repo:
+            console.log("Not a valid git repository")
+            return
+        if len(statement.argv) < 2:
+            console.log("Usage: find <expression>")
+            return
+        expression = statement.argv[1]
+        try:
+            ret = self.repo.repo.git.grep(expression)
+        except GitCommandError:
+            console.log("No matches found")
+            return
+        console.print(ret)
+
     def complete_show(self, text, line, begidx, endidx):
         return self.settings_complete(text, line, begidx, endidx)
 
@@ -468,12 +560,15 @@ class CnaasCliApp(cmd2.Cmd):
                 token = find_dict_by_key(yaml_item, next_find_dict_key, token)
                 next_find_dict_key = None
 
-            if isinstance(yaml_item, list) and token < len(yaml_item):
-                yaml_item = yaml_item[token]
-            elif token in yaml_item:
-                yaml_item = yaml_item[token]
-            if is_list_of_dicts(yaml_item, "name"):
-                next_find_dict_key = "name"
+            yaml_item, primary_key = self.get_next_yaml_item(argv, token, yaml_item, convert=False)
+            if primary_key:
+                next_find_dict_key = primary_key
+            #if isinstance(yaml_item, list) and token < len(yaml_item):
+            #    yaml_item = yaml_item[token]
+            #elif token in yaml_item:
+            #    yaml_item = yaml_item[token]
+            #if is_list_of_dicts(yaml_item, "name"):
+            #    next_find_dict_key = "name"
         return yaml_item
 
     def yaml_set_helper(self, argv, yaml_item, set_value=None):
@@ -506,13 +601,15 @@ class CnaasCliApp(cmd2.Cmd):
             else:
                 # don't update yaml_item for last token, since we want to update mutable object dict/list instead of immutable object str/int/bool
                 if dict_level != len(argv) - 1:
-                    yaml_item = yaml_item[token]
+                    yaml_item, next_find_dict_key = self.get_next_yaml_item(argv, token, yaml_item, convert=False)
+                    #yaml_item = yaml_item[token]
 
-            if is_list_of_dicts(yaml_item, "name"):
-                next_find_dict_key = "name"
+            #if is_list_of_dicts(yaml_item, "name"): -> set elif
+            #    next_find_dict_key = "name"
             # if last element in yaml is a list, or if pydantic model thinks it should become a list
             # TODO: generic way
-            elif (isinstance(yaml_item, list) and dict_level == len(argv)-1) or (len(token_path) >= 3 and token_path[0] == "interfaces" and token_path[2] == "tagged_vlan_list"):
+            #was elif
+            if (isinstance(yaml_item, list) and dict_level == len(argv)-1) or (len(token_path) >= 3 and token_path[0] == "interfaces" and token_path[2] == "tagged_vlan_list"):
                 #print("Appending to list")
                 next_append_list = True
                 # if list already exists, update yaml_item so old_value will be old list
