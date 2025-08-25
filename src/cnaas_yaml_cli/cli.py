@@ -8,7 +8,7 @@ import importlib
 import importlib.metadata
 from copy import copy
 from io import StringIO
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, List
 
 import cmd2
 import ruamel.yaml
@@ -31,7 +31,6 @@ yaml.preserve_quotes = True
 yaml.width = 1000
 
 console = Console()
-
 
 
 def get_pydantic_type(token_path: list[str]) -> Union[FieldInfo, str, None]:
@@ -128,7 +127,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
         for cmd in remove_bulitins:
             delattr(cmd2.Cmd, cmd)
         if f_root is None and self.valid_repo:
-            self.do_get_datamodel(None)
+            self.get_datamodel(None)
 
     def color_prompt_input(self, data: cmd2.plugin.PrecommandData) -> cmd2.plugin.PrecommandData:
         print(data.statement)
@@ -182,7 +181,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
             pass
         return [cur_match for cur_match in ifclasses if cur_match.startswith(tokens[index])]
 
-    def get_next_yaml_item(self, tokens, token, yaml_item, convert=True) -> (Any, Optional[str]):
+    def get_list_of_dict_primary_key(self, tokens, token):
         list_of_dicts_keys = [
             {"path": ["interfaces"], "primary_key": "name"},
             {"path": ["extroute_bgp", "vrfs"], "primary_key": "name"},
@@ -193,25 +192,30 @@ class CnaasYamlCliApp(cmd2.Cmd):
             {"path": ["radius_servers"], "primary_key": "host"},
             {"path": ["vrfs"], "primary_key": "name"},
         ]
-        try:
-            path_start_index = 2
-            primary_key = None
-            for item in list_of_dicts_keys:
-                for i in range(0, len(tokens)-path_start_index):
-                    if item["path"][i] == "*":
+        path_start_index = 2
+        for item in list_of_dicts_keys:
+            for i in range(0, len(tokens)-path_start_index):
+                if item["path"][i] == "*":
+                    continue
+                if not isinstance(tokens[i+path_start_index], str):
+                    break
+                if item["path"][i] == tokens[i+path_start_index] and i == len(item["path"])-1:
+                    if tokens[i+path_start_index] == token:
+                        yield item["primary_key"]
                         continue
-                    if not isinstance(tokens[i+path_start_index], str):
-                        break
-                    if item["path"][i] == tokens[i+path_start_index] and i == len(item["path"])-1:
-                        if tokens[i+path_start_index] == token:
-                            primary_key = item["primary_key"]
-                            if convert:
-                                return convert_list_of_dicts(yaml_item[token], item["primary_key"]), item["primary_key"]
-                        break
-                    if item["path"][i] != tokens[i+path_start_index]:
-                        break
+                    break
+                if item["path"][i] != tokens[i+path_start_index]:
+                    break
 
+    def get_next_yaml_item(self, tokens, token, yaml_item, convert=True) -> (Any, Optional[str]):
+        primary_key = None
+        for item in self.get_list_of_dict_primary_key(tokens, token):
+            primary_key = item
+            if convert:
+                return convert_list_of_dicts(yaml_item[token], primary_key), primary_key
+            break
 
+        try:
             if isinstance(yaml_item, list):
                 if token is None:
                     raise ValueError("List element not found")
@@ -334,20 +338,31 @@ class CnaasYamlCliApp(cmd2.Cmd):
                             if is_last_token:
                                 return self.complete_last_token(current_field, tokens[index])
                         if hasattr(current_field.annotation, "_name") and current_field.annotation._name == 'List':
+                            # compare
+                            primary_key = None
+                            for item in self.get_list_of_dict_primary_key(tokens[:-1], tokens[-2]):
+                                primary_key = item
                             list_of_dicts = is_list_of_dicts_field(current_field)
-                            current_field = current_field.annotation.__args__[0]
+                            if list_of_dicts != (primary_key is not None):
+                                print(f"\nDiff: {list_of_dicts} != {primary_key}, {token}, -> {(primary_key is not None)}")
+                                cmd2.cmd2.rl_force_redisplay()
+                                #list_of_dicts = (primary_key is not None)
+                            if list_of_dicts and primary_key is None:
+                                current_field = current_field.annotation.__args__[0]
+                                pass
+                            else:
+                                current_field = current_field.annotation.__args__[0]
                             if is_last_token:
                                 # for interfaces, we should complete interface options
-                                if not list_of_dicts:
+                                if primary_key is None:
                                     continue
                                 return [cur_match for cur_match in current_field.model_fields.keys() if
                                         cur_match.startswith(tokens[index])]
                             else:
                                 # do inspect interfaces, but not statements?? because interfaces is converted to dict?
                                 if list_of_dicts:
-                                    pass
-#                                        if not is_last_token:
-#                                            inspect_inner = True
+                                    if not is_last_token:
+                                        inspect_inner = False
                         elif hasattr(current_field.annotation, "_name") and current_field.annotation._name == 'Dict':
                             current_field = current_field.annotation.__args__[1]
                             if is_last_token:
@@ -554,12 +569,27 @@ class CnaasYamlCliApp(cmd2.Cmd):
 
         if set_value.isdigit():
             set_value = int(set_value)
+        elif set_value == '[]':
+            set_value = []
         if new_key:
             old_value = None
         elif next_append_list:
             old_value = copy(yaml_item)
         else:
             old_value = copy(yaml_item[argv[-1]])
+        if key_type == "List of dicts":
+            # if old_value is list, and set value is not list?
+            if isinstance(old_value, List) and not isinstance(set_value, List):
+                # new empty key, set primary_key to set_value
+                primary_key = None
+                for item in self.get_list_of_dict_primary_key(argv, token):
+                    primary_key = item
+                if primary_key:
+                    new_list = copy(old_value)
+                    new_list.append({primary_key: set_value})
+                    set_value = new_list
+                    final_set_value = new_list
+
         if next_append_list:
             if new_key:
                 yaml_item[argv[-1]] = [set_value]
@@ -592,7 +622,8 @@ class CnaasYamlCliApp(cmd2.Cmd):
                 continue
             with open(filename) as f:
                 text = f.read()
-                console.log(f"{filename}:")
+                short_filename = filename.removeprefix(os.getcwd()+os.path.sep)
+                console.log(f"{short_filename}:")
                 if len(statement.argv) == 2:
                     with console.pager():
                         console.print(text)
@@ -671,6 +702,9 @@ class CnaasYamlCliApp(cmd2.Cmd):
 
     def do_get_datamodel(self, statement: Optional[cmd2.Statement]) -> None:
         """Download a datamodel file from github so tab completion has something to work with"""
+        self.get_datamodel(statement)
+
+    def get_datamodel(self, statement: Optional[cmd2.Statement]) -> None:
         datamodel_file = os.path.join(os.path.split(__file__)[0], "settings_fields.py")
         if os.path.isfile(datamodel_file):
             confirm_delete = input("Datamodel file exists, remove it? [y/N] ")
