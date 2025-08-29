@@ -14,6 +14,7 @@ import cmd2
 import ruamel.yaml
 from git.exc import InvalidGitRepositoryError, GitCommandError
 from pydantic.fields import FieldInfo
+from pydantic import ValidationError
 from rich.console import Console
 
 from settingsrepo import Settingsrepo
@@ -187,6 +188,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
             {"path": ["extroute_bgp", "vrfs"], "primary_key": "name"},
             {"path": ["extroute_static", "vrfs"], "primary_key": "name"},
             {"path": ["extroute_bgp", "vrfs", "*", "neighbor_v4"], "primary_key": "peer_ipv4"},
+            {"path": ["extroute_bgp", "vrfs", "*", "neighbor_v6"], "primary_key": "peer_ipv6"},
             {"path": ["ntp_servers"], "primary_key": "host"},
             {"path": ["syslog_servers"], "primary_key": "host"},
             {"path": ["radius_servers"], "primary_key": "host"},
@@ -278,6 +280,8 @@ class CnaasYamlCliApp(cmd2.Cmd):
                         return [cur_match for cur_match in f_root.model_fields.keys() if cur_match.startswith(tokens[index])]
                     current_field = f_root
                     inspect_inner = False
+                    inspect_inner_list = False
+                    suggest_on_empty_yaml = None
                     for idx, token in enumerate(token_path):
                         is_last_token = idx == len(token_path) - 1
                         #print(f"DEBUG idx: {idx}, token: {token}, {len(token_path)}, last = {is_last_token}, yaml_item: {str(yaml_item)[:20]}")
@@ -294,6 +298,10 @@ class CnaasYamlCliApp(cmd2.Cmd):
                         if inspect_inner:
                             current_field = current_field.model_fields[token]
                             inspect_inner = False
+
+                        if inspect_inner_list:
+                            current_field = current_field.annotation.__args__[0]
+                            inspect_inner_list = False
 
                         if is_last_token and (hasattr(current_field, 'model_fields') or hasattr(current_field, "annotation") ):
                             current_subfield = None
@@ -324,9 +332,15 @@ class CnaasYamlCliApp(cmd2.Cmd):
                         if not hasattr(current_field, 'annotation'):
                             # try to complete from yaml data instead of model
                             if hasattr(current_field, 'model_fields'):
-                                current_field = current_field.model_fields[token]
+                                #current_field = current_field.model_fields[token]
+                                pass
                             else:
                                 inspect_inner = True
+                            if list_of_dicts and isinstance(token, int):
+                                inspect_inner = True
+                            if list_of_dicts and isinstance(token, int) and is_last_token:
+                                return [cur_match for cur_match in current_field.model_fields.keys() if
+                                        cur_match.startswith(tokens[index])]
                             continue
                         if hasattr(current_field.annotation, "_name") and current_field.annotation._name == 'Optional':
                             if is_last_token:
@@ -340,29 +354,43 @@ class CnaasYamlCliApp(cmd2.Cmd):
                         if hasattr(current_field.annotation, "_name") and current_field.annotation._name == 'List':
                             # compare
                             primary_key = None
-                            for item in self.get_list_of_dict_primary_key(tokens[:-1], tokens[-2]):
+                            for item in self.get_list_of_dict_primary_key(tokens[:-2], tokens[-3]):
                                 primary_key = item
                             list_of_dicts = is_list_of_dicts_field(current_field)
-                            if list_of_dicts != (primary_key is not None):
-                                print(f"\nDiff: {list_of_dicts} != {primary_key}, {token}, -> {(primary_key is not None)}")
-                                cmd2.cmd2.rl_force_redisplay()
+                            #if list_of_dicts == (primary_key is None):
                                 #list_of_dicts = (primary_key is not None)
                             if list_of_dicts and primary_key is None:
-                                current_field = current_field.annotation.__args__[0]
+                                print(f"\nDiff: {list_of_dicts} != {primary_key}, {token}, -> {(primary_key is not None)}")
+                                cmd2.cmd2.rl_force_redisplay()
+                                # should not be set on list, -> return []   but then should be set inside list of dict?
+                                # if List then continue, otherwise set current_field
+                                if hasattr(current_field, 'annotation') and current_field.annotation._name in ['List']:
+                                    inspect_inner_list = True  # should this be set only if not is_last_token?
+                                    continue
+                                else:
+                                    current_field = current_field.annotation.__args__[0] ## dbg1
+                                #inspect_inner_list = True
+                                # inspect inner list element, not inner field
+                                #inspect_inner = True
                                 pass
                             else:
                                 current_field = current_field.annotation.__args__[0]
                             if is_last_token:
                                 # for interfaces, we should complete interface options
                                 if primary_key is None:
-                                    continue
+                                    ##
+                                    suggest_on_empty_yaml = ['[]']  # if existing list elements, suggest creating empty list
+                                    if not hasattr(current_field, "model_fields"):
+                                        #pass  ## dbg1
+                                        continue
                                 return [cur_match for cur_match in current_field.model_fields.keys() if
                                         cur_match.startswith(tokens[index])]
                             else:
                                 # do inspect interfaces, but not statements?? because interfaces is converted to dict?
                                 if list_of_dicts:
                                     if not is_last_token:
-                                        inspect_inner = False
+                                        pass
+                                        #inspect_inner = False
                         elif hasattr(current_field.annotation, "_name") and current_field.annotation._name == 'Dict':
                             current_field = current_field.annotation.__args__[1]
                             if is_last_token:
@@ -376,12 +404,19 @@ class CnaasYamlCliApp(cmd2.Cmd):
                                 current_field = current_field.model_fields[token]
 
                 if isinstance(yaml_item, list):
-                    return [cur_match for cur_match in list(map(str, range(len(yaml_item)))) if cur_match.startswith(tokens[index])]
+                    list_items = [cur_match for cur_match in list(map(str, range(len(yaml_item)))) if cur_match.startswith(tokens[index])]
+                    if not list_items:
+                        return ['0']
+                    else:
+                        return list_items
                 elif isinstance(yaml_item, dict):
                     available_options = set(yaml_item.keys())
                     return [cur_match for cur_match in available_options if cur_match.startswith(tokens[index])]
                 else:
-                    return []
+                    if suggest_set and suggest_on_empty_yaml != None:
+                        return suggest_on_empty_yaml
+                    else:
+                        return []
 
         except Exception as e:
             console.log(type(e))
@@ -525,6 +560,8 @@ class CnaasYamlCliApp(cmd2.Cmd):
         next_append_list = False
         new_key = False
         new_parent_key = False
+        new_element = False
+        new_parent_element = False
         final_set_value = set_value
         for dict_level in range(2, len(argv)):
             next_append_list = False
@@ -540,11 +577,16 @@ class CnaasYamlCliApp(cmd2.Cmd):
             token_path.append(token)
             try:
                 yaml_item[token]
-            except (KeyError, IndexError, TypeError):
+            except (KeyError, TypeError):
                 if dict_level == len(argv) - 1:
                     new_key = True
                 elif dict_level == len(argv) - 2:
                     new_parent_key = True
+            except IndexError:
+                if dict_level == len(argv) - 1:
+                    new_element = True
+                elif dict_level == len(argv) - 2:
+                    new_parent_element = True
             else:
                 # don't update yaml_item for last token, since we want to update mutable object dict/list instead of immutable object str/int/bool
                 if dict_level != len(argv) - 1:
@@ -601,6 +643,9 @@ class CnaasYamlCliApp(cmd2.Cmd):
             if new_parent_key:
                 yaml_item[token_path[-2]] = {}
                 yaml_item = yaml_item[token_path[-2]]
+            elif new_parent_element:
+                yaml_item.append({})
+                yaml_item = yaml_item[-1]
             if token == "config":
                 yaml_item[argv[-1]] = ruamel.yaml.scalarstring.LiteralScalarString(set_value)
             else:
@@ -668,18 +713,25 @@ class CnaasYamlCliApp(cmd2.Cmd):
                     #if yaml_str == set_value:
                     #    print("same")
                     #    continue
-
                     yaml_item = yaml.load(text)
+                    pre_num_errors = 0
+                    try:
+                        f_root(**yaml_item).model_dump()
+                    except ValidationError as e:
+                        pre_num_errors = len(e.errors())
+
                     token_path, old_value, final_set_value = self.yaml_set_helper(statement.argv[:-1], yaml_item, set_value)
                     try:
                         f_root(**yaml_item).model_dump()
-                    except Exception as e:
+                    except ValidationError as e:
                         console.log(f"Error: {e}")
                         console.print("Repository syntax reference:")
                         console.print("https://cnaas-nms.readthedocs.io/en/latest/reporef/index.html")
-                        continue_anyway = input("Syntax did not validate. Set value anyway? [y/N] ")
-                        if continue_anyway.lower() != "y":
-                            continue
+                        post_num_errors = len(e.errors())
+                        if pre_num_errors < post_num_errors:
+                            continue_anyway = input("Syntax did not validate. Set value anyway? [y/N] ")
+                            if continue_anyway.lower() != "y":
+                                continue
                     if old_value == final_set_value:
                         console.log("Value unchanged")
                     else:
