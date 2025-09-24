@@ -207,6 +207,8 @@ class CnaasYamlCliApp(cmd2.Cmd):
             {"path": ["interfaces"], "primary_key": "name"},
             {"path": ["extroute_bgp", "vrfs"], "primary_key": "name"},
             {"path": ["extroute_static", "vrfs"], "primary_key": "name"},
+            {"path": ["extroute_static", "vrfs", "*", "ipv4"], "primary_key": "destination"},
+            {"path": ["extroute_static", "vrfs", "*", "ipv6"], "primary_key": "destination"},
             {"path": ["extroute_bgp", "vrfs", "*", "neighbor_v4"], "primary_key": "peer_ipv4"},
             {"path": ["extroute_bgp", "vrfs", "*", "neighbor_v6"], "primary_key": "peer_ipv6"},
             {"path": ["ntp_servers"], "primary_key": "host"},
@@ -346,7 +348,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
             description += "List of: "
         if annotation in [str, int, bool, Optional[str], Optional[int], Optional[bool]]:
             description += f"{current_type_description} ({str(annotation)})"
-        elif typing.get_origin(annotation) == Union:
+        elif typing.get_origin(annotation) == Union and any([x in [str, int, bool] for x in typing.get_args(annotation)]):
             description += self.get_union_message(annotation)
         else:
             return None
@@ -449,7 +451,10 @@ class CnaasYamlCliApp(cmd2.Cmd):
                         elif isinstance(current_field, BaseModel):
                             if hasattr(current_type, "annotation") and current_type.annotation._name == "Optional":
                                 current_type = typing.get_args(current_type.annotation)[0]
-                            current_type = current_type.model_fields[token]
+                            if typing.get_origin(current_type) == list:
+                                current_type = typing.get_args(current_type)[0].model_fields[token]
+                            else:
+                                current_type = current_type.model_fields[token]
                             prev_field = current_field
                             current_field = getattr(current_field, token, None)
                             complete_final_value = self.complete_final_value(token, current_type)
@@ -673,6 +678,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
                 token = int(token)
 
             if next_find_dict_key is not None:
+                new_field_input = {}
                 new_field_input[next_find_dict_key] = token
                 token = find_dict_by_key(yaml_item, next_find_dict_key, token, setter=False)  # debug, setter=false
                 next_find_dict_key = None
@@ -704,7 +710,6 @@ class CnaasYamlCliApp(cmd2.Cmd):
             try:
                 key_type = get_pydantic_type(token_path)  # if last token is None, skip that and check previous token type
             except Exception as e:
-                raise e
                 key_type = None
             if key_type == "List":
                 #print("Appending to list")
@@ -763,7 +768,10 @@ class CnaasYamlCliApp(cmd2.Cmd):
                 yaml_item = yaml_item[token_path[-2]]
                 final_set_value = yaml_item
             elif new_key and not isinstance(yaml_item, list):
-                yaml_item[argv[-1]] = [set_value]
+                if set_value == []:
+                    yaml_item[argv[-1]] = []
+                else:
+                    yaml_item[argv[-1]] = [set_value]
                 final_set_value = yaml_item[argv[-1]]
             elif isinstance(yaml_item, list):
                 if token in ['tagged_vlan_list']:
