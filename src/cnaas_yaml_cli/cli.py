@@ -282,7 +282,17 @@ class CnaasYamlCliApp(cmd2.Cmd):
                 message_list.append(str(tp))
         return ", or ".join(message_list)
 
-    def fill_new_field(self, field_type: FieldInfo, **kwargs) -> BaseModel:
+    def fill_new_field(self, field_type: FieldInfo, previous_input: Union[int, str, bool] = None, **kwargs) -> Union[BaseModel, str]:
+        def input_previous(prompt, previous_input):
+            if previous_input is not None:
+                indata = input(f"{prompt.rstrip().rstrip(':')} (Press enter to use previous input: {previous_input}): ")
+                if indata == "":
+                    return previous_input
+                else:
+                    return indata
+            else:
+                return input(prompt)
+
         indata = {**kwargs}
         ret = None
         while True:
@@ -292,12 +302,12 @@ class CnaasYamlCliApp(cmd2.Cmd):
                 if isinstance(field_type, list):
                     return [] # ??
                 if field_type in [str, int, bool]:
-                    return input(f"Enter value ({field_type}): ")
+                    return input_previous(f"Enter value ({field_type}): ", previous_input)
                 if typing.get_origin(field_type) == Union:
                     message = self.get_union_message(field_type)
-                    return input(f"Enter value for {message}: ")
+                    return input_previous(f"Enter value for {message}: ", previous_input)
                 if field_type is None:
-                    return input("Enter value (unknown type): ")
+                    return input_previous("Enter value (unknown type): ", previous_input)
                 ret = field_type(**indata)
                 break
             except ValidationError as e:
@@ -391,7 +401,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
 
         try:
             # first token is the command, second is the file name
-            filename = os.path.join(os.getcwd(), tokens[1])
+            filename = glob.glob(os.path.join(os.getcwd(), tokens[1]))[0]
             with open(filename) as f:
                 yaml_item = yaml.load(f.read())
                 token_path = []
@@ -484,7 +494,14 @@ class CnaasYamlCliApp(cmd2.Cmd):
                                 if primary_key:
                                     return [getattr(cur_match, primary_key) for cur_match in current_field if getattr(cur_match, primary_key).startswith(tokens[index])]
 
-                                list_items = [cur_match for cur_match in list(map(str, range(len(current_field)))) if
+                                # TODO: show current vlan ids in use
+                                if tokens[-1] == '':
+                                    current_values = [repr(cur_match) for cur_match in current_field]
+                                    #print(f"\nCurrent values: {', '.join(current_values)}")
+                                    # show current values at the top of possible tab completions
+
+
+                                list_items = [CompletionItem(value=cur_match, description="testar") for cur_match in list(map(str, range(len(current_field)))) if
                                               cur_match.startswith(tokens[index])]
                                 if not list_items:
                                     a = CompletionItem(value="0", description="Create new list-entry")
@@ -658,7 +675,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
             #    next_find_dict_key = "name"
         return yaml_item
 
-    def yaml_set_helper(self, argv, yaml_item, set_value=None):
+    def yaml_set_helper(self, argv, yaml_item, set_value=None, previous_input=None) -> (list, Any, Any, Any):
         token_path = []
 
         next_find_dict_key = None
@@ -670,6 +687,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
         new_parent_element = False
         new_field_input = {}
         final_set_value = set_value
+        input_value = None  # save input value for next loop (globbing set)
         for dict_level in range(2, len(argv)):
             next_append_list = False
             token = argv[dict_level]
@@ -716,9 +734,28 @@ class CnaasYamlCliApp(cmd2.Cmd):
                 next_append_list = True
                 # if list already exists, update yaml_item so old_value will be old list
                 # dict_level == len(argv) - 1 , since we already advance yaml_item above
-                if not new_key and not new_parent_key and not next_append_list and dict_level == len(argv) - 1 and isinstance(yaml_item[token], list):
+                # if not new_key and not new_parent_key and not next_append_list and dict_level == len(argv) - 1 and isinstance(yaml_item[token], list):
+                if not new_key and not new_parent_key and dict_level == len(argv) - 1 and isinstance(yaml_item[token], list):
                     yaml_item = yaml_item[token]
 
+        last_arg = int(argv[-1]) if argv[-1].isdigit() else argv[-1]
+        # Detect direct VLAN ID set for tagged_vlan_list
+        if last_arg == "tagged_vlan_list":
+            old_value = None
+            if str(set_value).isdigit():
+                vlan_id = int(set_value)
+            else:
+                vlan_id = str(set_value)
+            if isinstance(yaml_item, list):
+                old_value = copy(yaml_item)
+                if vlan_id not in yaml_item:
+                    yaml_item.append(vlan_id)
+                final_set_value = yaml_item
+            else:
+                yaml_item["tagged_vlan_list"] = [vlan_id]
+                final_set_value = yaml_item["tagged_vlan_list"]
+            token_path.append(last_arg)
+            return token_path, old_value, final_set_value, None
         if set_value is None:
             pass
         elif set_value.isdigit():
@@ -734,7 +771,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
             set_value = self.fill_new_field(key_type)
         elif set_value == "new-list":
             next_append_list = True
-            set_value = self.fill_new_field(key_type, **new_field_input)
+            set_value = self.fill_new_field(key_type, previous_input=previous_input, **new_field_input)
             if type(set_value) == str:
                 if set_value.isdigit():
                     set_value = int(set_value)
@@ -742,13 +779,14 @@ class CnaasYamlCliApp(cmd2.Cmd):
                     set_value = True
                 elif set_value.lower() == 'false':
                     set_value = False
+                input_value = set_value
 
         if new_key:
             old_value = None
         elif next_append_list:
             old_value = copy(yaml_item)
         else:
-            old_value = copy(yaml_item[argv[-1]])
+            old_value = copy(yaml_item[last_arg])
         if key_type == "List of dicts":
             # if old_value is list, and set value is not list?
             if isinstance(old_value, List) and not isinstance(set_value, List):
@@ -769,10 +807,10 @@ class CnaasYamlCliApp(cmd2.Cmd):
                 final_set_value = yaml_item
             elif new_key and not isinstance(yaml_item, list):
                 if set_value == []:
-                    yaml_item[argv[-1]] = []
+                    yaml_item[last_arg] = []
                 else:
-                    yaml_item[argv[-1]] = [set_value]
-                final_set_value = yaml_item[argv[-1]]
+                    yaml_item[last_arg] = [set_value]
+                final_set_value = yaml_item[last_arg]
             elif isinstance(yaml_item, list):
                 if token in ['tagged_vlan_list']:
                     # only append to list if new unique value
@@ -790,13 +828,13 @@ class CnaasYamlCliApp(cmd2.Cmd):
                 yaml_item.append({})
                 yaml_item = yaml_item[-1]
             if token == "config":
-                yaml_item[argv[-1]] = ruamel.yaml.scalarstring.LiteralScalarString(set_value)
+                yaml_item[last_arg] = ruamel.yaml.scalarstring.LiteralScalarString(set_value)
             elif set_value is None:
-                del yaml_item[argv[-1]]
+                del yaml_item[last_arg]
             else:
-                yaml_item[argv[-1]] = set_value
-        token_path.append(argv[-1])
-        return token_path, old_value, final_set_value
+                yaml_item[last_arg] = set_value
+        token_path.append(last_arg)
+        return token_path, old_value, final_set_value, input_value
 
     def complete_set(self, text, line, begidx, endidx):
         return self.settings_complete(text, line, begidx, endidx, suggest_set=True)
@@ -851,7 +889,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
                 console.log(f"{short_filename}:")
 
                 yaml_item = yaml.load(text)
-                token_path, old_value, final_set_value = self.yaml_set_helper(statement.argv, yaml_item, None)
+                token_path, old_value, final_set_value, _ = self.yaml_set_helper(statement.argv, yaml_item, None)
 
             with open(filename, "wb") as f:
                 yaml.dump(yaml_item, f)
@@ -864,6 +902,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
 
         Sets yaml setting specified by filepath and yaml keys to value. Filepath can use globbing.
         """
+        previous_input = None
         for filename in glob.glob(os.path.join(os.getcwd(), statement.argv[1])):
             if not os.path.isfile(filename):
                 console.log(f"{filename} is not a file")
@@ -892,8 +931,9 @@ class CnaasYamlCliApp(cmd2.Cmd):
                         pre_num_errors = len(e.errors())
 
                     try:
-                        token_path, old_value, final_set_value = self.yaml_set_helper(statement.argv[:-1], yaml_item, set_value)
+                        token_path, old_value, final_set_value, previous_input = self.yaml_set_helper(statement.argv[:-1], yaml_item, set_value, previous_input=previous_input)
                     except TypeError as e:
+                        raise e
                         console.log(f"TypeError, specify full path ({e})")
                         return
                     except KeyError as e:
