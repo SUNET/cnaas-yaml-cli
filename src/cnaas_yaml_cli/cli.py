@@ -14,7 +14,7 @@ from typing import Any, Optional, Union, List
 
 import cmd2
 import ruamel.yaml
-from cmd2 import CompletionItem
+from cmd2 import CompletionItem, CompletionError
 from git.exc import InvalidGitRepositoryError, GitCommandError
 from pydantic.fields import FieldInfo
 from pydantic import ValidationError, BaseModel
@@ -26,7 +26,6 @@ try:
     from settings_fields import f_root
 except ImportError:
     f_root = None
-
 
 yaml = ruamel.yaml.YAML()
 yaml.indent(sequence=4, offset=2)
@@ -495,13 +494,18 @@ class CnaasYamlCliApp(cmd2.Cmd):
                                     return [getattr(cur_match, primary_key) for cur_match in current_field if getattr(cur_match, primary_key).startswith(tokens[index])]
 
                                 # TODO: show current vlan ids in use
-                                if tokens[-1] == '':
+                                if tokens[-1] == '' and len(current_field) > 0:
                                     current_values = [repr(cur_match) for cur_match in current_field]
-                                    #print(f"\nCurrent values: {', '.join(current_values)}")
-                                    # show current values at the top of possible tab completions
+                                    if type(current_field[0]) in [str, int]:
+                                        raise CompletionError(f"Current values: {', '.join(current_values)}", apply_style=False)
+                                    else:
+                                        msg = 'Current values:\n'
+                                        for index, val in enumerate(current_values):
+                                            msg += f"{index}: {val}\n"
+                                        msg += f"{len(current_values)}: new-list, create new list-entry"
+                                        raise CompletionError(msg, apply_style=False)
 
-
-                                list_items = [CompletionItem(value=cur_match, description="testar") for cur_match in list(map(str, range(len(current_field)))) if
+                                list_items = [cur_match for cur_match in list(map(str, range(len(current_field)+1))) if
                                               cur_match.startswith(tokens[index])]
                                 if not list_items:
                                     a = CompletionItem(value="0", description="Create new list-entry")
@@ -532,6 +536,8 @@ class CnaasYamlCliApp(cmd2.Cmd):
                     else:
                         return []
 
+        except CompletionError as e:
+            raise e
         except Exception as e:
             console.log(type(e))
             print(str(e))
