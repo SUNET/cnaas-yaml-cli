@@ -1,0 +1,58 @@
+[project]
+name = "cnaas_yaml_cli"
+version = "0.0.6"
+description = "A CLI interface for doing auto-completion of YAML items in a CNaaS settings repository"
+authors = [
+    { name = "Johan Marcusson", email = "johan.marcusson@sunet.se" }
+]
+readme = "README.md"
+license = "BSD-2-clause"
+license-files = ["LICEN[CS]E*"]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
+
+requires-python = ">=3.11"
+dependencies = [
+    "cmd2>=2.6.1",
+    "GitPython>=3.1.44",
+    "pydantic>=2.11.3",
+    "rich>=14.0.0",
+    "ruamel.yaml>=0.18.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+  "ANN",
+  "ASYNC",
+  "E",
+  "ERA",
+  "F",
+  "FAST",
+  "FLY",
+  "FURB",
+  "I",
+  "PERF",
+  "PGH",
+  "PIE",
+  "PL",
+  "UP",
+  "W",
+]
+ignore = ["PLR", "ANN401", "ANN204", "E501"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[project.urls]
+Homepage = "https://github.com/SUNET/cnaas-yaml-cli"
+Issues = "https://github.com/SUNET/cnaas-yaml-cli/issues"
