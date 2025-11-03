@@ -55,7 +55,10 @@ def get_pydantic_type(token_path: list[str]) -> Union[FieldInfo, str, None]:
                     pass
                     #print(e)
         if hasattr(current_field, "model_fields"):
-            current_field = current_field.model_fields[token]
+            try:
+                current_field = current_field.model_fields[token]
+            except KeyError:
+                return current_field
             annotation = current_field.annotation
             if hasattr(annotation, "_name") and annotation._name == 'Optional':
                 current_field = current_field.annotation.__args__[0]
@@ -469,10 +472,17 @@ class CnaasYamlCliApp(cmd2.Cmd):
                             complete_final_value = self.complete_final_value(token, current_type)
                             if complete_final_value is not None:
                                 return complete_final_value
-                            if current_field is None:
+                            if current_field is None or current_field == []:
                                 # current_field = prev_field.__class__.model_fields[token]
                                 if typing.get_origin(current_type.annotation) == list:
+                                    if token_path[-1] == 0:
+                                        return ['new-list']
                                     next_type == list  # get next type, next loop fail on IndexError since list 0 not created, then create it?
+                                    return ['0']
+                                if typing.get_origin(current_type.annotation) == Union and len(typing.get_args(current_type.annotation)) == 2 and typing.get_origin(typing.get_args(current_type.annotation)[0]) == list:
+                                    if token_path[-1] == 0:
+                                        return ['new-list']
+                                    next_type = list
                                     return ['0']
 
 
@@ -808,6 +818,11 @@ class CnaasYamlCliApp(cmd2.Cmd):
 
         if next_append_list:
             if new_parent_key:
+                primary_key = None
+                for item in self.get_list_of_dict_primary_key(token_path[:-1], token_path[-2]):
+                    primary_key = item
+                if primary_key:
+                    set_value = {primary_key: set_value}
                 yaml_item[token_path[-2]] = [set_value]
                 yaml_item = yaml_item[token_path[-2]]
                 final_set_value = yaml_item
