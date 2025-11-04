@@ -140,7 +140,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
     complete_cd = functools.partialmethod(cmd2.Cmd.path_complete, path_filter=os.path.isdir)
 
     def __init__(self):
-        super().__init__()
+        super().__init__(multiline_commands=["multilineset"])
         self.validate_repo()
         self._set_prompt()
         self.register_precmd_hook(self.color_prompt_input)
@@ -860,6 +860,9 @@ class CnaasYamlCliApp(cmd2.Cmd):
     def complete_set(self, text, line, begidx, endidx):
         return self.settings_complete(text, line, begidx, endidx, suggest_set=True)
 
+    def complete_multilineset(self, text, line, begidx, endidx):
+        return self.settings_complete(text, line, begidx, endidx, suggest_set=True)
+
     def do_show(self, statement: cmd2.Statement) -> None:
         """Usage: show [filepath] [yaml_key1] [yaml_key2] ...
 
@@ -978,6 +981,12 @@ class CnaasYamlCliApp(cmd2.Cmd):
 
                     with open(filename, "wb") as f:
                         yaml.dump(yaml_item, f)
+
+    def do_multilineset(self, statement: cmd2.Statement) -> None:
+        """Usage: multilineset [filepath] [yaml_key1] [yaml_key2] ... "value line 1\nvalue line 2";
+
+        Sets yaml setting specified by filepath and yaml keys to a multi-line value, value should be enclosed in " and terminated with ;"""
+        self.do_set(statement)
 
     def do_diff(self, statement: cmd2.Statement) -> None:
         """Perform a git diff on the repository"""
