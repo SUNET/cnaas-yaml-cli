@@ -193,17 +193,6 @@ class CnaasYamlCliApp(cmd2.Cmd):
         else:
             return []
 
-    def complete_ifclass(self, tokens, index):
-        ifclasses = ['custom', 'downlink', 'fabric', 'mirror']
-        try:
-            with open(os.path.join(self.cwd, "global", "base_system.yml")) as f:
-                base_system_data = yaml.load(f)
-                if "port_template_options" in base_system_data:
-                    ifclasses.extend([f"port_template_{name}" for name in base_system_data["port_template_options"].keys()])
-        except Exception:
-            pass
-        return [cur_match for cur_match in ifclasses if cur_match.startswith(tokens[index])]
-
     def get_list_of_dict_primary_key(self, tokens, token):
         list_of_dicts_keys = [
             {"path": ["interfaces"], "primary_key": "name"},
@@ -347,7 +336,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
         return snippet
 
 
-    def complete_final_value(self, token: str, current_type):
+    def complete_final_value(self, token: str, current_type, text: str):
         try:
             current_type_description = current_type.description if current_type.description else "No description"
         except Exception:
@@ -368,8 +357,37 @@ class CnaasYamlCliApp(cmd2.Cmd):
         if snippet:
             print(f"\nDocs: {snippet}")
         print(f"\n{token}: {description}")
+        completion = self.get_porttemplate_options(text)
         cmd2.cmd2.rl_force_redisplay()
+        return completion
+
+    def get_porttemplate_options(self, text) -> list[str]:
+        global_base_system_file = os.path.join(os.getcwd(), "global", "base_system.yml")
+        try:
+            with open(global_base_system_file) as f:
+                global_base_system_yaml = yaml.load(f.read())
+                if "port_template_options" in global_base_system_yaml:
+                    print("\nport_template options:")
+                    default_completions = ['custom', 'downlink', 'fabric', 'mirror']
+                    available_completions = []
+                    for option, description in global_base_system_yaml["port_template_options"].items():
+                        print(f"    port_template_{option}: {description.get('description', 'No description')}")
+                        if option.startswith(text.removeprefix("port_template_")):
+                            available_completions.append(f"port_template_{option}")
+                    for default_option in default_completions:
+                        if default_option.startswith(text):
+                            available_completions.append(default_option)
+                    if len(available_completions) == 1:
+                        return available_completions
+                    elif len(available_completions) > 1:
+                        # return all characters up to the first differing character from available_completions:
+                        common_prefix = os.path.commonprefix(available_completions)
+                        if common_prefix and common_prefix != text:
+                            return [common_prefix]
+        except Exception as e:
+            print(e)
         return []
+
 
     def convert_token_to_index(self, tokens, token, current_field: List[dict]):
         primary_key = None
@@ -469,7 +487,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
                                 current_type = current_type.model_fields[token]
                             prev_field = current_field
                             current_field = getattr(current_field, token, None)
-                            complete_final_value = self.complete_final_value(token, current_type)
+                            complete_final_value = self.complete_final_value(token, current_type, text)
                             if complete_final_value is not None:
                                 return complete_final_value
                             if current_field is None or current_field == []:
@@ -774,7 +792,7 @@ class CnaasYamlCliApp(cmd2.Cmd):
             return token_path, old_value, final_set_value, None
         if set_value is None:
             pass
-        elif set_value.isdigit():
+        elif set_value.removeprefix('-').isdigit():
             set_value = int(set_value)
         elif set_value.lower() == 'true':
             set_value = True
