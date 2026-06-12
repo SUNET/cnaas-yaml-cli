@@ -3,6 +3,7 @@
 import functools
 import glob
 import os
+import pathlib
 import re
 import urllib.request
 import importlib
@@ -20,6 +21,11 @@ from pydantic.fields import FieldInfo
 from pydantic import ValidationError, BaseModel
 from rich.console import Console
 from rich.style import Style
+from rich.tree import Tree
+from rich import print
+from rich.text import Text
+from rich.filesize import decimal
+from rich.markup import escape
 
 from settingsrepo import Settingsrepo
 
@@ -134,6 +140,34 @@ def find_dict_by_key(obj, find_key, name, setter=False):
         obj.append({find_key: name})
         return len(obj) - 1
     return None
+
+
+def walk_directory(directory: pathlib.Path, tree: Tree) -> None:
+    """Recursively build a Tree with directory contents."""
+    # Sort dirs first then by filename
+    paths = sorted(
+        pathlib.Path(directory).iterdir(),
+        key=lambda path: (path.is_file(), path.name.lower()),
+    )
+    for path in paths:
+        # Remove hidden files
+        if path.name.startswith("."):
+            continue
+        if path.is_dir():
+            branch = tree.add(
+                f"[bold magenta]:open_file_folder: [link file://{path}]{escape(path.name)}"
+            )
+            walk_directory(path, branch)
+        else:
+            file_size = path.stat().st_size
+            if file_size == 0:
+                text_filename = Text(path.name, "grey50")
+            else:
+                text_filename = Text(path.name, "green")
+            text_filename.highlight_regex(r"\..*$", "grey50")
+            text_filename.stylize(f"link file://{path}")
+            text_filename.append(f" ({decimal(file_size)})", "grey50")
+            tree.add(text_filename)
 
 
 class CnaasYamlCliApp(cmd2.Cmd):
@@ -1057,6 +1091,15 @@ class CnaasYamlCliApp(cmd2.Cmd):
                 pass
 
             break
+
+    def do_tree(self, statement: cmd2.Statement) -> None:
+        """Show directory tree of current directory"""
+        tree = Tree(
+            f":open_file_folder: [link file://{self.cwd}]{self.cwd}",
+            guide_style="grey50"
+        )
+        walk_directory(pathlib.Path(self.cwd), tree)
+        print(tree)
 
     def do_version(self, statement: cmd2.Statement) -> None:
         """Show version"""
