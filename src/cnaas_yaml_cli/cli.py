@@ -19,6 +19,7 @@ from git.exc import InvalidGitRepositoryError, GitCommandError
 from pydantic.fields import FieldInfo
 from pydantic import ValidationError, BaseModel
 from rich.console import Console
+from rich.style import Style
 
 from settingsrepo import Settingsrepo
 
@@ -53,7 +54,7 @@ def get_pydantic_type(token_path: list[str]) -> Union[FieldInfo, str, None]:
                     continue
                 except Exception as e:
                     pass
-                    #print(e)
+                #print(e)
         if hasattr(current_field, "model_fields"):
             try:
                 current_field = current_field.model_fields[token]
@@ -159,16 +160,16 @@ class CnaasYamlCliApp(cmd2.Cmd):
     def _set_prompt(self) -> None:
         """Set prompt so it displays the current working directory."""
         self.cwd = os.getcwd()
-        color = cmd2.ansi.Fg.RED
+        color = cmd2.Color.RED
         if self.valid_repo:
             if self.repo.repo.is_dirty():
-                color = cmd2.ansi.Fg.LIGHT_CYAN
+                color = cmd2.Color.LIGHT_CYAN
             else:
-                color = cmd2.ansi.Fg.GREEN
+                color = cmd2.Color.GREEN
             path = os.path.split(self.cwd)[-1]
         else:
             path = self.cwd
-        self.prompt = cmd2.ansi.style(path, fg=color, bold=True) + ' > '
+        self.prompt = cmd2.stylize(f"{path} > ", style=Style(color=color, bold=True))
 
     def postcmd(self, stop: bool, _line: str) -> bool:
         """Hook method executed just after a command dispatch is finished.
